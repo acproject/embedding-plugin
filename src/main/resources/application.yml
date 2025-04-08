@@ -10,11 +10,11 @@ plugin:
   version: 0.1.0
   description: 基于DJL和PyTorch的文本向量化插件，支持多语言
   serverHost: localhost
-  serverPort: 8080
-  pluginPort: 8081
+  serverPort: 19090
+  pluginPort: 8086
   modelType: LaBSE
   # 添加模型文件路径配置
-  modelPath: models/LaBSE.pt
+  modelPath: models/LaBSE/LaBSE.pt
 
 # 日志配置
 logging:

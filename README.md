@@ -103,6 +103,5 @@ if (response != null && response.containsKey("embedding")) {
 - **模型加载失败**: 检查网络连接，确保可以访问模型URL
 - **插件注册失败**: 确保主服务器正在运行并可访问
 
-## 许可证
-
-[Apache License 2.0](LICENSE)
+## 参考
+https://djl.ai/extensions/tokenizers/

@@ -22,10 +22,12 @@ public class PluginServiceImpl extends PluginServiceGrpc.PluginServiceImplBase {
     private static final Logger logger = LoggerFactory.getLogger(PluginServiceImpl.class);
 
     private final EmbeddingPlugin embeddingPlugin;
+    private final long startTime;
 
     @Autowired
     public PluginServiceImpl(EmbeddingPlugin embeddingPlugin) {
         this.embeddingPlugin = embeddingPlugin;
+        this.startTime = System.currentTimeMillis();
     }
 
     @Override
@@ -66,6 +68,21 @@ public class PluginServiceImpl extends PluginServiceGrpc.PluginServiceImplBase {
     }
 
     @Override
+    public void heartbeat(HeartbeatRequest request, StreamObserver<HeartbeatResponse> responseObserver) {
+        logger.debug("收到心跳请求");
+        
+        HeartbeatResponse response = HeartbeatResponse.newBuilder()
+                .setReceived(true)
+                .setServerTime(System.currentTimeMillis())
+                .build();
+        
+        responseObserver.onNext(response);
+        responseObserver.onCompleted();
+        
+        logger.debug("已响应心跳请求");
+    }
+
+    @Override
     public void getStatus(StatusRequest request, StreamObserver<StatusResponse> responseObserver) {
         logger.info("收到状态请求: {}", request.getPluginId());
         
@@ -73,11 +90,14 @@ public class PluginServiceImpl extends PluginServiceGrpc.PluginServiceImplBase {
             // 获取插件信息
             com.owiseman.dataapi.plugins.sdk.PluginInfo info = embeddingPlugin.getInfo();
             
+            // 计算运行时间
+            long uptime = System.currentTimeMillis() - startTime;
+            
             // 构建响应
             StatusResponse response = StatusResponse.newBuilder()
                     .setStatus(info.getStatus())
                     .setDetails("嵌入向量插件正常运行中")
-                    .setUptime(System.currentTimeMillis()) // 简化处理，实际应记录启动时间
+                    .setUptime(uptime)
                     .build();
             
             // 发送响应

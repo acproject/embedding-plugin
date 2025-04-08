@@ -12,11 +12,13 @@ import ai.djl.training.util.ProgressBar;
 import ai.djl.translate.TranslateException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
 
@@ -28,8 +30,10 @@ import java.util.Arrays;
 public class EmbeddingModelService {
 
     private static final Logger logger = LoggerFactory.getLogger(EmbeddingModelService.class);
-    private static final String MODEL_URL = "https://storage.googleapis.com/tfhub-modules/google/LaBSE/1.tar.gz";
     private static final String MODEL_NAME = "LaBSE";
+    
+    @Value("${plugin.modelPath:models/saved_model}")
+    private String modelPath;
 
     private ZooModel<String, float[]> model;
     private Predictor<String, float[]> predictor;
@@ -43,13 +47,15 @@ public class EmbeddingModelService {
     public void init() {
         try {
             logger.info("开始加载LaBSE模型...");
-
+            
+            Path modelDirectory = Paths.get(modelPath);
+            logger.info("模型绝对路径: {}", modelDirectory);
             // 设置模型加载标准
             Criteria<String, float[]> criteria = Criteria.builder()
                     .setTypes(String.class, float[].class)
-                    .optModelUrls(MODEL_URL)
+                    .optModelPath(modelDirectory)
                     .optModelName(MODEL_NAME)
-                    .optEngine("PyTorch") // 使用PyTorch引擎
+                    .optEngine("PyTorch")
                     .optProgress(new ProgressBar())
                     .optTranslator(new TextEmbeddingTranslator())
                     .build();
@@ -60,12 +66,15 @@ public class EmbeddingModelService {
 
             // 初始化分词器
             try {
-                // 尝试从模型资源中加载词汇表
+                // 尝试从模型目录中加载词汇表
+                Path vocabPath = Paths.get(modelDirectory.getParent().toString(), "models/LaBSE_1/assets/cased_vocab.txt");
+                logger.info("尝试加载词汇表: {}", vocabPath);
+                
                 tokenizer = new BertFullTokenizer(DefaultVocabulary.builder()
                         .optMinFrequency(1)
                         .optUnknownToken("[UNK]")
-                        .addFromTextFile(Paths.get("vocab.txt"))
-                        .build(),false);
+                        .addFromTextFile(vocabPath)
+                        .build(), false);
             } catch (Exception e) {
                 logger.warn("无法加载词汇表文件，将使用默认分词器: {}", e.getMessage());
             }

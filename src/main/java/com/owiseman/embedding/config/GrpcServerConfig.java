@@ -6,6 +6,7 @@ import io.grpc.ServerBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import javax.annotation.PostConstruct;
@@ -37,28 +38,36 @@ public class GrpcServerConfig {
     /**
      * 启动gRPC服务器
      */
-    @PostConstruct
-    public void startServer() {
-        try {
-            int port = properties.getPluginPort();
-            logger.info("启动gRPC服务器，端口: {}", port);
-            
-            server = ServerBuilder.forPort(port)
-                    .addService(pluginService)
-                    .build()
-                    .start();
-            
-            logger.info("gRPC服务器启动成功，监听端口: {}", port);
-            
-            // 添加JVM关闭钩子
-            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                logger.info("JVM关闭，停止gRPC服务器...");
-                stopServer();
-            }));
-        } catch (IOException e) {
-            logger.error("启动gRPC服务器失败: {}", e.getMessage(), e);
-            throw new RuntimeException("无法启动gRPC服务器", e);
-        }
+    @Bean
+    public Server grpcServer() throws IOException {
+        int port = properties.getPluginPort();
+        logger.info("启动gRPC服务器，端口: {}", port);
+        
+        server = ServerBuilder.forPort(port)
+                .addService(pluginService)
+                .maxInboundMessageSize(10 * 1024 * 1024) // 10MB
+                .build()
+                .start();
+        
+        logger.info("gRPC服务器启动成功，监听端口: {}", port);
+        
+        // 在一个新线程中等待终止
+        new Thread(() -> {
+            try {
+                server.awaitTermination();
+            } catch (InterruptedException e) {
+                logger.error("gRPC服务器被中断", e);
+                Thread.currentThread().interrupt();
+            }
+        }).start();
+        
+        // 添加JVM关闭钩子
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            logger.info("JVM关闭，停止gRPC服务器...");
+            stopServer();
+        }));
+        
+        return server;
     }
 
     /**
@@ -73,6 +82,7 @@ public class GrpcServerConfig {
                 logger.info("gRPC服务器已停止");
             } catch (InterruptedException e) {
                 logger.warn("停止gRPC服务器时被中断", e);
+                server.shutdownNow();
                 Thread.currentThread().interrupt();
             }
         }
