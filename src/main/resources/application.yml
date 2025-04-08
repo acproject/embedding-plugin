@@ -1,6 +1,6 @@
 # 服务器配置
 server:
-  port: ${plugin.pluginPort:8081}
+  port: 8086
   servlet:
     context-path: /
 
@@ -11,7 +11,7 @@ plugin:
   description: 基于DJL和PyTorch的文本向量化插件，支持多语言
   serverHost: localhost
   serverPort: 19090
-  pluginPort: 8086
+  pluginPort: 8087
   modelType: LaBSE
   # 添加模型文件路径配置
   modelPath: models/LaBSE/LaBSE.pt

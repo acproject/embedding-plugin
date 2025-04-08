@@ -1,9 +1,12 @@
 package com.owiseman.embedding.service;
 
 import ai.djl.MalformedModelException;
+import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.djl.inference.Predictor;
 import ai.djl.modality.nlp.DefaultVocabulary;
 import ai.djl.modality.nlp.bert.BertFullTokenizer;
+import ai.djl.ndarray.NDArray;
+import ai.djl.ndarray.NDList;
 import ai.djl.repository.zoo.Criteria;
 import ai.djl.repository.zoo.ModelNotFoundException;
 import ai.djl.repository.zoo.ModelZoo;
@@ -20,7 +23,9 @@ import javax.annotation.PreDestroy;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 /**
  * 嵌入模型服务
@@ -38,6 +43,8 @@ public class EmbeddingModelService {
     private ZooModel<String, float[]> model;
     private Predictor<String, float[]> predictor;
     private BertFullTokenizer tokenizer;
+
+    private static final int MAX_TEXT_LENGTH = 512; // 最大文本长度，超过此长度将进行分段处理
 
     /**
      * 初始化模型
@@ -67,14 +74,9 @@ public class EmbeddingModelService {
             // 初始化分词器
             try {
                 // 尝试从模型目录中加载词汇表
-                Path vocabPath = Paths.get(modelDirectory.getParent().toString(), "models/LaBSE_1/assets/cased_vocab.txt");
-                logger.info("尝试加载词汇表: {}", vocabPath);
-                
-                tokenizer = new BertFullTokenizer(DefaultVocabulary.builder()
-                        .optMinFrequency(1)
-                        .optUnknownToken("[UNK]")
-                        .addFromTextFile(vocabPath)
-                        .build(), false);
+                HuggingFaceTokenizer tokenizer = HuggingFaceTokenizer.newInstance(Paths.get("models/LaBSE/tokenizer.json"));
+
+
             } catch (Exception e) {
                 logger.warn("无法加载词汇表文件，将使用默认分词器: {}", e.getMessage());
             }
@@ -89,30 +91,93 @@ public class EmbeddingModelService {
     /**
      * 获取文本的嵌入向量
      * @param text 输入文本
-     * @return 嵌入向量（浮点数数组）
+     * @return 嵌入向量数组
      */
-    public float[] getEmbedding(String text) {
-        try {
-            if (text == null || text.trim().isEmpty()) {
-                logger.warn("尝试对空文本进行向量化");
-                return new float[0];
-            }
-
-            // 对文本进行预处理（如有必要）
-            String processedText = preprocessText(text);
-
-            // 使用模型预测获取嵌入向量
-            float[] embedding = predictor.predict(processedText);
-
-            // 对向量进行归一化处理
-            normalizeVector(embedding);
-
-            logger.debug("成功生成嵌入向量，维度: {}", embedding.length);
-            return embedding;
-        } catch (TranslateException e) {
-            logger.error("生成嵌入向量失败: {}", e.getMessage(), e);
-            throw new RuntimeException("无法生成嵌入向量", e);
+    public float[] getEmbedding(String text) throws Exception {
+        if (text == null || text.trim().isEmpty()) {
+            throw new IllegalArgumentException("输入文本不能为空");
         }
+        
+        // 检查文本长度，如果过长则分段处理
+        if (text.length() > MAX_TEXT_LENGTH) {
+            logger.warn("输入文本过长 ({}字符)，已截断至约{}个token", text.length(), MAX_TEXT_LENGTH);
+            text = preprocessText(text);
+        }
+        
+        try {
+            // 直接使用predictor进行预测
+            float[] result = predictor.predict(text);
+            
+            // 对结果进行归一化
+            normalizeVector(result);
+            
+            logger.info("成功生成嵌入向量，维度: {}", result.length);
+            return result;
+        } catch (Exception e) {
+            logger.error("生成嵌入向量失败: {}", e.getMessage(), e);
+            throw e;
+        }
+    }
+    
+    /**
+     * 处理长文本的嵌入向量生成
+     * 将长文本分段处理，然后合并结果
+     */
+    private float[] getEmbeddingForLongText(String text) throws Exception {
+        // 分段处理的最大长度（字符数）
+        final int SEGMENT_LENGTH = MAX_TEXT_LENGTH / 2;
+        
+        // 分段
+        List<String> segments = new ArrayList<>();
+        for (int i = 0; i < text.length(); i += SEGMENT_LENGTH) {
+            int end = Math.min(i + SEGMENT_LENGTH, text.length());
+            segments.add(text.substring(i, end));
+        }
+        
+        logger.info("长文本已分为{}段进行处理", segments.size());
+        
+        // 处理每个分段
+        List<float[]> embeddings = new ArrayList<>();
+        for (int i = 0; i < segments.size(); i++) {
+            String segment = segments.get(i);
+            logger.info("处理第{}段文本，长度: {}", i + 1, segment.length());
+            
+            try {
+                // 直接使用predictor进行预测
+                float[] embedding = predictor.predict(segment);
+                
+                // 对结果进行归一化
+                normalizeVector(embedding);
+                
+                // 添加到结果列表
+                embeddings.add(embedding);
+            } catch (Exception e) {
+                logger.error("处理第{}段文本时出错: {}", i + 1, e.getMessage());
+                throw e;
+            }
+        }
+        
+        // 合并所有分段的嵌入向量（取平均值）
+        if (embeddings.isEmpty()) {
+            throw new RuntimeException("没有成功处理任何文本分段");
+        }
+        
+        // 获取向量维度
+        int dimension = embeddings.get(0).length;
+        float[] result = new float[dimension];
+        
+        // 计算所有分段向量的平均值
+        for (float[] embedding : embeddings) {
+            for (int i = 0; i < dimension; i++) {
+                result[i] += embedding[i] / embeddings.size();
+            }
+        }
+        
+        // 对最终结果进行归一化
+        normalizeVector(result);
+        
+        logger.info("成功合并{}段文本的嵌入向量，维度: {}", embeddings.size(), dimension);
+        return result;
     }
 
     /**

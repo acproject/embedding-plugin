@@ -1,11 +1,6 @@
 package com.owiseman.embedding.service;
 
-import com.owiseman.dataapi.proto.HeartbeatRequest;
-import com.owiseman.dataapi.proto.PluginRegistration;
-import com.owiseman.dataapi.proto.PluginServiceGrpc;
-import com.owiseman.dataapi.proto.RegistrationResponse;
-import com.owiseman.dataapi.proto.GetPluginByNameRequest;
-import com.owiseman.dataapi.proto.GetPluginByNameResponse;
+import com.owiseman.dataapi.proto.*;
 import com.owiseman.embedding.config.PluginProperties;
 import com.owiseman.embedding.plugin.EmbeddingPlugin;
 import io.grpc.ManagedChannel;
@@ -19,6 +14,7 @@ import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -49,19 +45,67 @@ public class PluginRegistrationService {
         this.embeddingPlugin = embeddingPlugin;
     }
 
-    /**
-     * 初始化gRPC通道并注册插件
-     */
-    @PostConstruct
-    public void init() {
-        initGrpcChannel();
+     @Scheduled(fixedRate = 60000) // 从30秒改为60秒发送一次心跳
+    public void sendHeartbeat() {
+        // 检查是否已初始化
+        if (blockingStub == null) {
+            logger.warn("blockingStub为空，尝试重新初始化gRPC通道");
+            initGrpcChannel();
+
+            // 如果初始化后仍为空，则返回
+            if (blockingStub == null) {
+                logger.error("无法初始化gRPC通道，跳过心跳发送");
+                return;
+            }
+        }
+
+        // 检查是否已注册
+        if (pluginId == null || pluginId.isEmpty()) {
+            logger.warn("插件ID为空，尝试注册插件");
+            registerPlugin();
+
+            // 如果注册后仍为空，则返回
+            if (pluginId == null || pluginId.isEmpty()) {
+                logger.error("插件注册失败，无法获取插件ID，跳过心跳发送");
+                return;
+            }
+        }
+
+        // 发送心跳
+        try {
+            logger.debug("发送心跳到服务器，插件ID: {}", pluginId);
+
+            HeartbeatRequest request = HeartbeatRequest.newBuilder()
+                    .setPluginId(pluginId)
+                    .setStatusInfo(embeddingPlugin.isRunning() ? "RUNNING" : "STOPPED")
+                    .build();
+
+            HeartbeatResponse response = blockingStub.heartbeat(request);
+
+            if (response.getReceived()) {
+                logger.debug("心跳发送成功，服务器时间: {}", response.getServerTime());
+            } else {
+                logger.warn("心跳发送失败，服务器未确认接收");
+            }
+        } catch (Exception e) {
+            logger.error("发送心跳时发生错误: {}", e.getMessage());
+
+            // 如果是连接问题，尝试重新初始化
+            if (e.getMessage().contains("UNAVAILABLE") ||
+                e.getMessage().contains("Connection") ||
+                e.getMessage().contains("transport")) {
+
+                logger.info("检测到连接问题，尝试重新初始化gRPC通道");
+                initGrpcChannel();
+            }
+        }
     }
 
-    /**
-     * 初始化gRPC通道
-     */
+    // 修改初始化方法，进一步调整keepalive设置
     private void initGrpcChannel() {
         try {
+            logger.info("初始化gRPC通道到 {}:{}", properties.getServerHost(), properties.getServerPort());
+
             // 关闭旧通道
             if (channel != null && !channel.isShutdown()) {
                 logger.info("关闭旧的gRPC通道");
@@ -69,56 +113,37 @@ public class PluginRegistrationService {
                     channel.shutdownNow().awaitTermination(2, TimeUnit.SECONDS);
                 } catch (InterruptedException e) {
                     logger.warn("关闭旧通道时中断", e);
-                    Thread.currentThread().interrupt();
                 }
             }
-            
-            // 创建gRPC通道
-            String serverAddress = properties.getServerHost() + ":" + properties.getServerPort();
-            logger.info("连接到主服务器: {}", serverAddress);
-            
-            channel = ManagedChannelBuilder.forTarget(serverAddress)
-                    .usePlaintext() // 开发环境使用明文传输，生产环境应使用TLS
-                    .maxInboundMessageSize(10 * 1024 * 1024) // 10MB
-                    // 添加更多连接参数
-                    .keepAliveTime(30, TimeUnit.SECONDS)
-                    .keepAliveTimeout(10, TimeUnit.SECONDS)
-                    .keepAliveWithoutCalls(true)
+
+            // 创建新通道，进一步调整keepalive设置
+            channel = ManagedChannelBuilder.forAddress(properties.getServerHost(), properties.getServerPort())
+                    .usePlaintext()
+                    // 完全禁用客户端keepalive，避免发送ping
+//                    .disableKeepAlive()// 禁用keepalive
+                    .maxInboundMessageSize(10 * 1024 * 1024)  // 10MB
                     .build();
-            
+
             blockingStub = PluginServiceGrpc.newBlockingStub(channel)
-                    .withMaxInboundMessageSize(10 * 1024 * 1024) // 10MB
-                    .withDeadlineAfter(15, TimeUnit.SECONDS); // 设置默认超时时间
-            
-            // 注册插件
-            registerPlugin();
+                    .withMaxInboundMessageSize(10 * 1024 * 1024);  // 10MB
+
+            logger.info("gRPC通道初始化成功");
+
+            // 立即尝试注册，确保连接有效
+            if (pluginId == null || pluginId.isEmpty()) {
+                registerPlugin();
+            }
         } catch (Exception e) {
-            logger.error("初始化插件注册服务失败: {}", e.getMessage(), e);
-            // 设置重试
-            scheduleReconnect();
+            logger.error("初始化gRPC通道时发生错误: {}", e.getMessage());
+            channel = null;
+            blockingStub = null;
         }
     }
 
-    /**
-     * 安排重新连接
-     */
-    private void scheduleReconnect() {
-        new Thread(() -> {
-            try {
-                logger.info("5秒后尝试重新连接...");
-                Thread.sleep(5000);
-                initGrpcChannel();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }).start();
-    }
-
-    /**
-     * 注册插件到主服务器
-     */
-    private void registerPlugin() {
-      if (blockingStub == null) {
+    // 修改注册方法，增加错误处理和重试逻辑
+    // 修改注册方法
+    public void registerPlugin() {
+        if (blockingStub == null) {
             logger.warn("blockingStub为空，尝试重新初始化gRPC通道");
             initGrpcChannel();
 
@@ -177,82 +202,147 @@ public class PluginRegistrationService {
         }
     }
 
-    /**
-     * 定期发送心跳
-     * 每30秒执行一次
-     */
-    @Scheduled(fixedRate = 30000)
-    public void sendHeartbeat() {
-        if (blockingStub == null) {
-            logger.warn("blockingStub为空，尝试重新初始化gRPC通道");
-            initGrpcChannel();
-            return;
+    public StatusResponse getStatus() {
+        if (pluginId == null) {
+            logger.warn("Cannot get status, plugin not registered");
+            return null;
         }
-        
-        if (!registered || pluginId == null) {
-            logger.warn("插件未注册，无法发送心跳");
-            // 尝试重新注册
-            registerPlugin();
-            return;
+
+        StatusRequest request = StatusRequest.newBuilder()
+                .setPluginId(pluginId)
+                .build();
+
+        try {
+            return blockingStub.getStatus(request);
+        } catch (Exception e) {
+            logger.error("Error getting status", e);
+            return null;
         }
-        
-        int retryCount = 0;
-        while (retryCount < MAX_RETRIES) {
-            try {
-                logger.debug("发送心跳... (尝试 {}/{})", retryCount + 1, MAX_RETRIES);
-                
-                // 创建心跳请求
-                HeartbeatRequest request = HeartbeatRequest.newBuilder()
-                        .setPluginId(pluginId)
-                        .setStatusInfo(embeddingPlugin.getInfo().getStatus())
-                        .build();
-                
-                // 发送心跳请求
-                blockingStub.heartbeat(request);
-                
-                lastSuccessfulHeartbeat = System.currentTimeMillis();
-                logger.debug("心跳发送成功");
-                return;
-            } catch (Exception e) {
-                logger.error("发送心跳失败 (尝试 {}/{}): {}", retryCount + 1, MAX_RETRIES, e.getMessage());
-                retryCount++;
-                
-                if (retryCount >= MAX_RETRIES) {
-                    this.registered = false; // 标记为未注册，下次会尝试重新注册
-                    // 如果连续失败，尝试重新初始化通道
-                    initGrpcChannel();
-                } else {
-                    try {
-                        // 等待一段时间再重试
-                        Thread.sleep(1000 * retryCount);
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
+    }
+
+    // 在类定义中添加CommandHandler依赖
+    @Autowired
+    private CommandHandler commandHandler;
+
+    // 修改executeCommand方法
+    public CommandResponse executeCommand(String command, Map<String, String> parameters) {
+        if (pluginId == null) {
+            logger.warn("Cannot execute command, plugin not registered");
+            return null;
+        }
+
+        try {
+            // 处理命令
+            Map<String, Object> result = commandHandler.handleCommand(command, parameters);
+            boolean success = (boolean) result.getOrDefault("success", false);
+
+            CommandResponse.Builder responseBuilder = CommandResponse.newBuilder()
+                    .setSuccess(success);
+
+            if (success) {
+                String message = (String) result.getOrDefault("message", "Command executed successfully");
+                responseBuilder.setResult(message);
+            } else {
+                String error = (String) result.getOrDefault("error", "Unknown error");
+                responseBuilder.setErrorMessage(error);
             }
+
+            return responseBuilder.build();
+        } catch (Exception e) {
+            logger.error("Error executing command", e);
+            return CommandResponse.newBuilder()
+                    .setSuccess(false)
+                    .setErrorMessage("Error: " + e.getMessage())
+                    .build();
         }
     }
 
-    /**
-     * 获取上次成功心跳的时间
-     */
-    public long getLastSuccessfulHeartbeat() {
-        return lastSuccessfulHeartbeat;
+    public void stopPlugin() {
+        if (pluginId == null) {
+            logger.warn("Cannot stop plugin, plugin not registered");
+            return;
+        }
+
+        StopRequest request = StopRequest.newBuilder()
+                .setPluginId(pluginId)
+                .build();
+
+        try {
+            StopResponse response = blockingStub.stopPlugin(request);
+            logger.info("Stop plugin response: {}", response.getMessage());
+        } catch (Exception e) {
+            logger.error("Error stopping plugin", e);
+        }
     }
 
-    /**
-     * 关闭gRPC通道
-     */
     @PreDestroy
     public void shutdown() {
-        logger.info("关闭插件注册服务...");
-        if (channel != null && !channel.isShutdown()) {
-            try {
-                channel.shutdown().awaitTermination(SHUTDOWN_TIMEOUT, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                logger.warn("关闭gRPC通道时被中断", e);
-                Thread.currentThread().interrupt();
-            }
+        logger.info("Shutting down gRPC channel");
+        try {
+            stopPlugin();
+            channel.shutdown().awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            logger.error("Error shutting down gRPC channel", e);
         }
+    }
+
+    // 添加一个发送消息的方法
+    // 修改发送消息的方法，增强错误处理
+    public boolean sendMessage(String topic, String message) {
+    // 重试计数器
+    int retryCount = 0;
+    final int MAX_RETRIES = 3;
+
+    while (retryCount < MAX_RETRIES) {
+    // 检查通道和插件ID
+    if (blockingStub == null || pluginId == null || pluginId.isEmpty()) {
+    logger.warn("通道或插件ID无效，尝试重新初始化 (重试 {}/{})", retryCount + 1, MAX_RETRIES);
+
+    // 重新初始化
+    initGrpcChannel();
+
+    // 如果仍然无效，增加重试计数
+    if (blockingStub == null || pluginId == null || pluginId.isEmpty()) {
+    retryCount++;
+    try {
+    // 等待一段时间再重试
+    Thread.sleep(1000 * retryCount);
+    } catch (InterruptedException e) {
+    Thread.currentThread().interrupt();
+    }
+    continue;
+    }
+    }
+
+    try {
+    logger.info("发送消息到主题: {} (重试 {}/{})", topic, retryCount, MAX_RETRIES);
+
+//    // 直接使用MqttService发布消息，绕过gRPC调用
+//    boolean success = mqttService.publish(topic, message);
+
+//    if (success) {
+//    logger.info("消息发送成功到主题: {}", topic);
+//    return true;
+//    } else {
+//    logger.error("消息发送失败到主题: {}", topic);
+//    retryCount++;
+//    }
+    } catch (Exception e) {
+    logger.error("发送消息时发生错误 (重试 {}/{}): {}", retryCount, MAX_RETRIES, e.getMessage());
+
+    // 增加重试计数
+    retryCount++;
+
+    try {
+    // 等待一段时间再重试
+    Thread.sleep(2000 * retryCount);
+    } catch (InterruptedException ie) {
+    Thread.currentThread().interrupt();
+    }
+    }
+    }
+
+    logger.error("发送消息失败，已达到最大重试次数: {}", MAX_RETRIES);
+    return false;
     }
 }
